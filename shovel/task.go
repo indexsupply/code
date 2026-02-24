@@ -36,6 +36,7 @@ type Source interface {
 	Latest(context.Context, string, uint64) (uint64, []byte, error)
 	Hash(context.Context, string, uint64) ([]byte, error)
 	NextURL() *jrpc2.URL
+	NumURLs() int
 }
 
 type Destination interface {
@@ -187,6 +188,8 @@ type Task struct {
 	dests       []Destination
 	destFactory func(config.Integration) (Destination, error)
 	destConfig  config.Integration
+
+	lastURLHost string // set by Converge for retry tracking
 }
 
 func (t *Task) update(
@@ -350,6 +353,7 @@ func (task *Task) Converge() error {
 		url     = nextURL.String()
 		nrpc    = uint64(0)
 	)
+	task.lastURLHost = nextURL.Hostname()
 	ctx = wctx.WithSrcHost(ctx, nextURL.Hostname())
 	ctx = wctx.WithCounter(ctx, &nrpc)
 
@@ -487,7 +491,7 @@ func (t *Task) load(
 			ctx = wctx.WithNumLimit(ctx, m, n)
 			b, err := t.src.Get(ctx, url, &t.filter, m, n)
 			if err != nil {
-				slog.ErrorContext(ctx, "loading blocks", "error", err)
+				slog.WarnContext(ctx, "loading blocks", "error", err)
 				return fmt.Errorf("loading blocks: %w", err)
 			}
 			blocksMut.Lock()
@@ -706,6 +710,8 @@ func (tm *Manager) Updates() uint64 {
 }
 
 func (tm *Manager) runTask(t *Task) {
+	numURLs := t.src.NumURLs()
+	failedURLs := make(map[string]struct{}, numURLs)
 	for {
 		select {
 		case <-tm.restart:
@@ -719,9 +725,21 @@ func (tm *Manager) runTask(t *Task) {
 			case errors.Is(err, ErrNothingNew):
 				time.Sleep(t.pollDuration)
 			case err != nil:
+				failedURLs[t.lastURLHost] = struct{}{}
 				time.Sleep(time.Second)
-				slog.ErrorContext(t.ctx, "converge-retry", "msg", err)
+				if len(failedURLs) >= numURLs {
+					slog.ErrorContext(t.ctx, "converge-retry",
+						"msg", err,
+						"failed-urls", len(failedURLs),
+					)
+				} else {
+					slog.WarnContext(t.ctx, "converge-retry",
+						"msg", err,
+						"failed-urls", len(failedURLs),
+					)
+				}
 			default:
+				failedURLs = make(map[string]struct{}, numURLs)
 				go func() {
 					// try out best to deliver update
 					// but don't stack up work

@@ -107,6 +107,10 @@ func (c *Client) NextURL() *URL {
 	return c.urls[next]
 }
 
+func (c *Client) NumURLs() int {
+	return len(c.urls)
+}
+
 func (c *Client) WithMaxReads(n int) *Client {
 	c.lcache.maxreads = n
 	c.bcache.maxreads = n

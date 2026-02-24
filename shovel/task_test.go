@@ -100,6 +100,10 @@ func (tg *testGeth) NextURL() *jrpc2.URL {
 	return jrpc2.MustURL("")
 }
 
+func (tg *testGeth) NumURLs() int {
+	return 1
+}
+
 func (tg *testGeth) factory(config.Source, glf.Filter) Source {
 	return tg
 }
