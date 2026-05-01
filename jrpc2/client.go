@@ -548,6 +548,13 @@ func (c *cache) get(nocache bool, ctx context.Context, url string, start, limit 
 	return seg.d, nil
 }
 
+// some EVM implementations may not produce a block for a given epoch,
+// especially in testnet context; treat eth_getBlockByNumber's "null round"
+// failure as an empty block so the indexer cursor can advance past the gap
+func isNullRoundError(e Error) bool {
+	return e.Code == 12 && strings.Contains(e.Message, "null round")
+}
+
 func (c *Client) blocks(ctx context.Context, url string, start, limit uint64) ([]eth.Block, error) {
 	var (
 		t0     = time.Now()
@@ -570,6 +577,10 @@ func (c *Client) blocks(ctx context.Context, url string, start, limit uint64) ([
 	}
 	for i := range resps {
 		if resps[i].Error.Exists() {
+			if isNullRoundError(resps[i].Error) {
+				blocks[i].Header.Number = eth.Uint64(start + uint64(i))
+				continue
+			}
 			const tag = "eth_getBlockByNumber"
 			return nil, fmt.Errorf("rpc=%s %w", tag, resps[i].Error)
 		}
@@ -634,6 +645,10 @@ func (c *Client) headers(ctx context.Context, url string, start, limit uint64) (
 	}
 	for i := range resps {
 		if resps[i].Error.Exists() {
+			if isNullRoundError(resps[i].Error) {
+				blocks[i].Header.Number = eth.Uint64(start + uint64(i))
+				continue
+			}
 			const tag = "eth_getBlockByNumber/headers"
 			return nil, fmt.Errorf("rpc=%s %w", tag, resps[i].Error)
 		}
@@ -787,7 +802,13 @@ func (c *Client) logs(ctx context.Context, url string, filter *glf.Filter, bm bl
 	)
 	switch {
 	case hresp.Error.Exists():
-		return fmt.Errorf("rpc=eth_getLogs/eth_getBlockByNumber %w", lresp.Error)
+		if isNullRoundError(hresp.Error) {
+			if b, ok := bm[toBlock]; ok {
+				b.Header.Number = eth.Uint64(toBlock)
+			}
+			break
+		}
+		return fmt.Errorf("rpc=eth_getBlockByNumber %w", hresp.Error)
 	case lresp.Error.Exists():
 		return fmt.Errorf("rpc=eth_getLogs %w", lresp.Error)
 	case hresp.Header == nil:
