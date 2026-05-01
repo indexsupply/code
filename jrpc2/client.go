@@ -787,7 +787,7 @@ func (c *Client) logs(ctx context.Context, url string, filter *glf.Filter, bm bl
 	)
 	switch {
 	case hresp.Error.Exists():
-		return fmt.Errorf("rpc=eth_getLogs/eth_getBlockByNumber %w", lresp.Error)
+		return fmt.Errorf("rpc=eth_getBlockByNumber %w", hresp.Error)
 	case lresp.Error.Exists():
 		return fmt.Errorf("rpc=eth_getLogs %w", lresp.Error)
 	case hresp.Header == nil:
