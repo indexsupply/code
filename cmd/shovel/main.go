@@ -51,6 +51,7 @@ func main() {
 		profile     string
 		version     bool
 		verbose     bool
+		stallExit   time.Duration
 	)
 	flag.StringVar(&cfile, "config", "", "task config file")
 	flag.BoolVar(&printSchema, "print-schema", false, "print schema and exit")
@@ -60,6 +61,8 @@ func main() {
 	flag.StringVar(&profile, "profile", "", "run profile after indexing")
 	flag.BoolVar(&version, "version", false, "version")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
+	flag.DurationVar(&stallExit, "stall-exit", 0,
+		"exit when a task's watermark stalls this long while siblings advance (0 disables)")
 
 	flag.Parse()
 
@@ -188,6 +191,19 @@ func main() {
 			time.Sleep(time.Minute * 10)
 		}
 	}()
+
+	if stallExit > 0 {
+		go mgr.WatchStalls(ctx, time.Minute, stallExit, func(stalled []string) {
+			slog.ErrorContext(ctx, "task-stalled",
+				"tasks", strings.Join(stalled, ","),
+				"stall_exit", stallExit.String(),
+			)
+			// The frozen goroutine's stack is the diagnosis; capture it before
+			// the supervisor replaces the process.
+			pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+			os.Exit(70)
+		})
+	}
 
 	ec := make(chan error)
 	go mgr.Run(ec)

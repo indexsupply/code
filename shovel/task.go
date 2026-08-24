@@ -231,6 +231,17 @@ func (t *Task) update(
 	return err
 }
 
+// Delete removes the task updates at or above n and the destination's data
+// for every block those updates covered.
+//
+// [Task.update] writes one shovel.task_updates row per converge batch and sets
+// num to the batch's LAST block, so a single update covers (previous update,
+// num]. Deleting data at >= n only would therefore keep the deleted batch's
+// canonical prefix -- blocks below n that no remaining update accounts for.
+// Converge resumes from the highest remaining update and requests those blocks
+// again, and since [Destination.Insert] uses COPY (no on conflict), the retry
+// fails against the destination's unique index forever: the task stops making
+// progress until the leftover rows are deleted by hand.
 func (t *Task) Delete(pg wpg.Conn, n uint64) error {
 	const q = `
 		delete from shovel.task_updates
@@ -242,15 +253,49 @@ func (t *Task) Delete(pg wpg.Conn, n uint64) error {
 	if err != nil {
 		return fmt.Errorf("deleting block from task table: %w", err)
 	}
-	err = t.dests[0].Delete(t.ctx, pg, n)
+	dn, err := t.resume(pg, n)
+	if err != nil {
+		return err
+	}
+	err = t.dests[0].Delete(t.ctx, pg, dn)
 	if err != nil {
 		return fmt.Errorf("deleting block: %w", err)
 	}
 	slog.InfoContext(t.ctx, "task-delete",
 		"n", n,
+		"data_n", dn,
 		"task_updates", cmd.RowsAffected(),
 	)
 	return nil
+}
+
+// resume reports the first block Converge will request once the task updates
+// at or above n are gone: one past the highest remaining update. It is never
+// greater than n, since no update at or above n survives the delete.
+//
+// With no updates left the task restarts at its configured start, or -- absent
+// one -- at the chain head, which is above anything already stored. Both cases
+// fall back to n rather than deleting the destination's whole history.
+func (t *Task) resume(pg wpg.Conn, n uint64) (uint64, error) {
+	const q = `
+		select coalesce(max(num) + 1, 0)
+		from shovel.task_updates
+		where src_name = $1
+		and ig_name = $2
+	`
+	var num uint64
+	err := pg.QueryRow(t.ctx, q, t.srcName, t.destConfig.Name).Scan(&num)
+	if err != nil {
+		return 0, fmt.Errorf("querying remaining task updates: %w", err)
+	}
+	switch {
+	case num > 0:
+		return num, nil
+	case t.start > 0:
+		return t.start, nil
+	default:
+		return n, nil
+	}
 }
 
 func (t *Task) latestDependency(pg wpg.Conn) (uint64, []byte, error) {

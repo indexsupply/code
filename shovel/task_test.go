@@ -64,6 +64,12 @@ func (dest *testDestination) Insert(_ context.Context, _ *sync.Mutex, _ wpg.Conn
 	dest.Lock()
 	defer dest.Unlock()
 	for _, b := range blocks {
+		// [dig.Integration.Insert] copies into a table with a unique index
+		// and has no on conflict clause, so re-inserting a block that was
+		// never deleted is an error rather than an overwrite.
+		if _, ok := dest.chain[b.Num()]; ok {
+			return 0, fmt.Errorf("duplicate key: %d", b.Num())
+		}
 		dest.chain[uint64(b.Header.Number)] = b
 	}
 	return int64(len(blocks)), nil
@@ -84,7 +90,12 @@ func (dest *testDestination) add(n uint64, hash, parent []byte) {
 func (dest *testDestination) Delete(_ context.Context, pg wpg.Conn, n uint64) error {
 	dest.Lock()
 	defer dest.Unlock()
-	delete(dest.chain, n)
+	// [dig.Integration.Delete] deletes at block_num >= n, not just n.
+	for num := range dest.chain {
+		if num >= n {
+			delete(dest.chain, num)
+		}
+	}
 	return nil
 }
 
@@ -214,6 +225,45 @@ func TestConverge_Reorg(t *testing.T) {
 
 	diff.Test(t, t.Fatalf, nil, task.update(pg, 0, hash(0), 0, hash(0), 0, 0, 0))
 	diff.Test(t, t.Fatalf, nil, task.update(pg, 1, hash(1), 0, hash(0), 0, 0, 0))
+
+	diff.Test(t, t.Fatalf, task.Converge(), nil)
+	diff.Test(t, t.Fatalf, task.Converge(), nil)
+	diff.Test(t, t.Errorf, dest.blocks(), tg.blocks)
+}
+
+// A converge batch writes one task update for its last block. When that block
+// is reorged out, the batch's earlier blocks have to go too -- no remaining
+// update covers them, and converge requests them again on the next pass.
+func TestConverge_ReorgBatchPrefix(t *testing.T) {
+	var (
+		pg        = testpg(t)
+		tg        = &testGeth{}
+		dest      = newTestDestination("foo")
+		task, err = NewTask(
+			WithPG(pg),
+			WithConcurrency(1, 2),
+			WithSource(tg),
+			WithIntegration(dest.ig()),
+			WithIntegrationFactory(dest.factory),
+		)
+	)
+	diff.Test(t, t.Fatalf, err, nil)
+
+	tg.add(0, hash(0), hash(0))
+	tg.add(1, hash(1), hash(0))
+	tg.add(2, hash(2), hash(1))
+	dest.add(0, hash(0), hash(0))
+	diff.Test(t, t.Fatalf, nil, task.update(pg, 0, hash(0), 0, hash(0), 0, 0, 0))
+
+	// blocks 1 and 2 land in one batch, covered by a single update at 2
+	diff.Test(t, t.Fatalf, task.Converge(), nil)
+	checkQuery(t, pg, `select max(num) = 2 from shovel.task_updates`)
+
+	// block 2 is reorged out. block 1 stays canonical, but the update that
+	// covered it is deleted along with 2, so it must be reindexed.
+	tg.blocks = tg.blocks[:2]
+	tg.add(2, hash(22), hash(1))
+	tg.add(3, hash(3), hash(22))
 
 	diff.Test(t, t.Fatalf, task.Converge(), nil)
 	diff.Test(t, t.Fatalf, task.Converge(), nil)

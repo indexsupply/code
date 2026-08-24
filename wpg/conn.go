@@ -23,7 +23,12 @@ func NewPool(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	conf.ConnConfig.RuntimeParams["statement_timeout"] = "5s"
+	// 5s kills legitimate bulk inserts: startup and busy-box converge statements
+	// routinely exceed it, and the startup form is fatal (crash loop until one
+	// start gets through). An explicit runtime param also beats PGOPTIONS, so the
+	// deployment cannot override it from the outside. 60s bounds a genuinely hung
+	// statement while clearing every insert observed in production (worst ~4.2s).
+	conf.ConnConfig.RuntimeParams["statement_timeout"] = "60s"
 	conf.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "10s"
 	return pgxpool.NewWithConfig(context.Background(), conf)
 }
